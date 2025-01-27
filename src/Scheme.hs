@@ -1,4 +1,5 @@
 {-# LANGUAGE BinaryLiterals #-}
+{-# LANGUAGE TupleSections  #-}
 
 module Scheme (schemeToken, SchemeToken (..)) where
 
@@ -6,7 +7,7 @@ import           Control.Monad
 import           Data.Char
 import           Data.Functor
 import           Data.Void
-import           GHC.Utils.Panic.Plain    (panic)
+import           GHC.Utils.Panic.Plain (panic)
 import           Numeric
 import           Text.Megaparsec
 import           Text.Megaparsec.Char
@@ -15,7 +16,7 @@ data SchemeToken
   = Identifier String
   | Integer Int
   | Float Float
-  | Imaginary Float
+  | Complex (Float, Float)
   | Boolean Bool
   | Character Char
   | String String
@@ -39,23 +40,23 @@ whitespace = spaceChar
 
 schemeToken :: Tokenizer SchemeToken
 schemeToken =
-  try identifier
-    <|> boolLiteral
+  Identifier <$> try identifier
+    <|> Boolean <$> boolLiteral
     <|> numberLiteral
-    <|> characterLiteral
-    <|> stringLiteral
-    <|> sexpStart
-    <|> sexpEnd
-    <|> vectorLiteralStart
+    <|> Character <$> characterLiteral
+    <|> String <$> stringLiteral
+    <|> sexpStart $> SexpStart
+    <|> sexpEnd $> SexpEnd
+    <|> vectorLiteralStart $> VectorLiteralStart
     <|> quote
-    <|> dot
+    <|> dot $> Dot
 
 -- <identifier> ::= <peculiarIdentifier> | <typicalIdentifier>
-identifier :: Tokenizer SchemeToken
+identifier :: Tokenizer String
 identifier = do
   ident <- peculiarIdentifier <|> typicalIdentifier
   _ <- lookAhead delimiter
-  return $ Identifier ident
+  return ident
 
 -- <peculiarIdentifier> ::= "+" | "-" | "..."
 peculiarIdentifier :: Tokenizer String
@@ -90,33 +91,30 @@ specialSubsequent :: Tokenizer Char
 specialSubsequent = oneOf ("+-.@" :: String)
 
 -- <boolLiteral> ::= "#t" | "#f"
-boolLiteral :: Tokenizer SchemeToken
+boolLiteral :: Tokenizer Bool
 boolLiteral = do
   literal <- string "#t" <|> string "#f"
-  return (Boolean (case literal of
+  return (case literal of
                       "#t" -> True
                       "#f" -> False
-                      _ -> panic "scheme bool literal")) <?> "bool literal"
+                      _    -> panic "scheme bool literal") <?> "bool literal"
 
--- <numberLiteral> ::= <integerLiteral> | <imaginaryLiteral> | <floatLiteral>
+-- <numberLiteral> ::= <integerLiteral> | <complexLiteral> | <floatLiteral>
 numberLiteral :: Tokenizer SchemeToken
 numberLiteral =
-  try integerLiteral
-  <|> try (imaginaryLiteral <?> "imaginary literal")
-  <|> (floatLiteral <?> "float literal")
+  Integer <$> try integerLiteral
+  <|> Complex <$> (try complexLiteral <?> "imaginary literal")
+  <|> (Float <$> floatLiteral <?> "float literal")
 
 -- <integerLiteral> ::=
 --     <binaryLiteral> | <octalLiteral> | <hexLiteral> | <decimalLiteral>
-integerLiteral :: Tokenizer SchemeToken
-integerLiteral = do
-  integer <-
-    choice
-      [ try binaryLiteral <?> "binary int literal",
-        try octalLiteral <?> "octal int literal",
-        try hexLiteral <?> "hex int literal",
-        try decimalLiteral <?> "int literal"
-      ]
-  return $ Integer integer
+integerLiteral :: Tokenizer Int
+integerLiteral = choice
+      [ try binaryLiteral,
+        try octalLiteral,
+        try hexLiteral,
+        try decimalLiteral
+      ] <?> "int literal"
 
 -- <binaryLiteral> ::= "#b" <binaryDigit>+
 binaryLiteral :: Tokenizer Int
@@ -124,10 +122,10 @@ binaryLiteral = do
   sgn <- sign
   _ <- string "#b"
   number <- someTill binaryDigit (lookAhead delimiter)
-  return $ case sgn of
+  return (case sgn of
     ""  -> fst (head (readBin number))
     "-" -> (-fst (head (readBin number)))
-    _ -> panic "should be a Haskell-parsable sign"
+    _   -> panic "should be a Haskell-parsable sign") <?> "binary int literal"
 
 -- <binaryDigit> ::= [01]
 binaryDigit :: Tokenizer Char
@@ -139,7 +137,7 @@ octalLiteral = do
   sgn <- sign
   _ <- string "#o"
   number <- someTill octalDigit (lookAhead delimiter)
-  return $ read $ sgn ++ "0o" ++ number
+  return (read $ sgn ++ "0o" ++ number) <?> "octal int literal"
 
 -- <octalDigit> ::= [0-7]
 octalDigit :: Tokenizer Char
@@ -151,7 +149,7 @@ hexLiteral = do
   sgn <- sign
   _ <- string "#x"
   number <- someTill hexDigit (lookAhead delimiter)
-  return $ read $ sgn ++ "0x" ++ number
+  return (read $ sgn ++ "0x" ++ number) <?> "hex int literal"
 
 -- <hexDigit> ::= [0-9a-fA-F]
 hexDigit :: Tokenizer Char
@@ -164,7 +162,7 @@ decimalLiteral = do
   number <-
     optional (string "#d")
       *> someTill decimalDigit (lookAhead delimiter)
-  return $ read $ sgn ++ number
+  return (read $ sgn ++ number) <?> "decimal int literal"
 
 -- <decimalDigit> ::= [0-9]
 decimalDigit :: Tokenizer Char
@@ -172,12 +170,8 @@ decimalDigit = digitChar
 
 -- <floatLiteral> ::= <floatExactPrefix> (
 --     <floatLiteralExp> | <floatLiteralNoExp>)
-floatLiteral :: Tokenizer SchemeToken
-floatLiteral = do
-  number <-
-    optional floatExactPrefix
-      *> (try floatLiteralExp <|> floatLiteralNoExp)
-  return $ Float number
+floatLiteral :: Tokenizer Float
+floatLiteral = optional floatExactPrefix *> (try floatLiteralExp <|> floatLiteralNoExp)
 
 -- <floatExactPrefix> ::= "#e" | "#i"
 floatExactPrefix :: Tokenizer String
@@ -203,12 +197,12 @@ exponentMarker = choice [char 's', char 'f', char 'd', char 'l', char 'e'] <?> "
 -- <sign> ::= ("+" | "-")?
 sign :: Tokenizer String
 sign = do
-  sgn <- optional (choice [string ("+" :: String), string ("-" :: String)])
-  return $ case sgn of
+  sgn <- optional (choice [string "+", string "-"])
+  return (case sgn of
     Just "-" -> "-"
     Just "+" -> ""
     Nothing  -> ""
-    _ -> panic "should be a sign or nothing"
+    _        -> panic "should be a sign or nothing") <?> "sign"
 
 -- <floatLiteralNoExp> ::= <floatWithoutIntPart> | <floatWithIntPart>
 floatLiteralNoExp :: Tokenizer Float
@@ -238,27 +232,59 @@ floatIntPart = some decimalDigit
 -- <floatWithoutIntPart> ::= "." <decimalDigit>+
 floatWithoutIntPart :: Tokenizer String
 floatWithoutIntPart = do
-  void $ char '.'
+  _ <- char '.'
   frac <- some decimalDigit
   return $ "0." ++ frac
 
--- <imaginaryLiteral> ::= <floatLiteral> "i"
-imaginaryLiteral :: Tokenizer SchemeToken
-imaginaryLiteral = do
-  magnitude <- floatLiteral
-  void $ char 'i'
-  return $ case magnitude of
-    Float f -> Imaginary f
-    _       -> panic "should be float"
+-- <complexLiteral> ::= <complex> | <imaginary>
+complexLiteral :: Tokenizer (Float, Float)
+complexLiteral = try complex <|> imaginary
+
+-- <complex> ::= <floatLiteral> <imaginaryPart>
+complex :: Tokenizer (Float, Float)
+complex = do
+  real <- floatLiteral
+  imag <- imaginaryPart
+  return (real, imag)
+
+-- <imaginary> ::= <imaginaryPart>
+imaginary :: Tokenizer (Float, Float)
+imaginary = (0.0,) <$> imaginaryPart
+
+-- <imaginaryPart> ::= <valuedImaginary> | <plainImaginary>
+imaginaryPart :: Tokenizer Float
+imaginaryPart = try valuedImaginary <|> plainImaginary
+
+-- <valuedImaginary> ::= <floatLiteral> "i"
+valuedImaginary :: Tokenizer Float
+valuedImaginary = do
+  imag <- floatLiteral
+  _ <- char 'i'
+  return imag
+
+-- <plainImaginary> ::= <definiteSign> "i"
+plainImaginary :: Tokenizer Float
+plainImaginary = do
+  sgn <- definiteSign
+  _ <- char 'i'
+  return $ case sgn of
+    ""  -> 1.0
+    "-" -> -1.0
+    _   -> panic "should be a Haskell-parsable sign"
+
+-- | Either "+" or "-", and positive is not implicit
+-- <definiteSign> ::= "+" | "-"
+definiteSign :: Tokenizer String
+definiteSign = choice [string "+" $> "", string "-"]
 
 -- <characterLiteral> ::= "#\" (<namedCharacter> | <visibleCharacter>)
 -- must be terminated by <delimiter>
-characterLiteral :: Tokenizer SchemeToken
+characterLiteral :: Tokenizer Char
 characterLiteral = do
   void $ string "#\\"
   character <- namedCharacter <|> visibleCharacter
   _ <- lookAhead delimiter
-  return (Character character) <?> "character literal"
+  return character <?> "character literal"
 
 -- <namedCharacter> ::= "space" | "newline" | "tab" | "linefeed"
 namedCharacter :: Tokenizer Char
@@ -275,12 +301,12 @@ visibleCharacter = do
   satisfy (not . isSpace)
 
 -- <stringLiteral> ::= '"' (<escapedCharacter> | <nonEscapedCharacter>)* '"'
-stringLiteral :: Tokenizer SchemeToken
+stringLiteral :: Tokenizer String
 stringLiteral = do
   _ <- char '"'
   contents <- many (escapedCharacter <|> nonEscapedCharacter)
   _ <- char '"'
-  return $ String contents
+  return contents
 
 escapedCharacter :: Tokenizer Char
 escapedCharacter = do
@@ -296,54 +322,57 @@ nonEscapedCharacter :: Tokenizer Char
 nonEscapedCharacter = noneOf ("\"\\" :: String)
 
 -- <sexpStart> ::= "("
-sexpStart :: Tokenizer SchemeToken
+sexpStart :: Tokenizer ()
 sexpStart = do
   _ <- string "("
-  return SexpStart
+  return ()
 
 -- <sexpEnd> ::= ")"
-sexpEnd :: Tokenizer SchemeToken
+sexpEnd :: Tokenizer ()
 sexpEnd = do
   _ <- string ")"
-  return SexpEnd
+  return ()
 
 -- <vectorLiteralStart> ::= "#("
-vectorLiteralStart :: Tokenizer SchemeToken
+vectorLiteralStart :: Tokenizer ()
 vectorLiteralStart = do
   _ <- string "#("
-  return VectorLiteralStart
+  return ()
 
 -- <quote> ::= <regularQuote> | <quasiquote> | <strippedQuote> | <unquote>
 quote :: Tokenizer SchemeToken
-quote = regularQuote <|> quasiquote <|> strippedQuote <|> unquote
+quote = regularQuote $> Quote
+  <|> quasiquote $> Quasiquote
+  <|> strippedQuote $> StrippedQuote
+  <|> unquote $> Unquote
 
 -- <regularQuote> ::= "'"
-regularQuote :: Tokenizer SchemeToken
+regularQuote :: Tokenizer ()
 regularQuote = do
   _ <- string "'"
-  return Quote
+  return ()
 
 -- <quasiquote> ::= "`"
-quasiquote :: Tokenizer SchemeToken
+quasiquote :: Tokenizer ()
 quasiquote = do
   _ <- string "`"
-  return Quasiquote
+  return ()
 
 -- <unquote> ::= ","
-unquote :: Tokenizer SchemeToken
+unquote :: Tokenizer ()
 unquote = do
   _ <- string ","
-  return Unquote
+  return ()
 
 -- <strippedQuote> ::= ",@"
-strippedQuote :: Tokenizer SchemeToken
+strippedQuote :: Tokenizer ()
 strippedQuote = do
   _ <- string ",@"
-  return StrippedQuote
+  return ()
 
 -- <dot> ::= "."
-dot :: Tokenizer SchemeToken
+dot :: Tokenizer ()
 dot = do
   _ <- char '.'
   _ <- lookAhead delimiter
-  return Dot
+  return ()

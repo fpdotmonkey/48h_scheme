@@ -157,11 +157,21 @@ imaginary :: Spec
 imaginary = do
   describe "imaginary literal" $ do
     it "is a float followed by 'i'" $ do
-      parse schemeToken "" "1.i" `shouldParse` Imaginary 1.0
-      parse schemeToken "" ".1i" `shouldParse` Imaginary 0.1
-      parse schemeToken "" "1.1i" `shouldParse` Imaginary 1.1
-      parse schemeToken "" "1e5i" `shouldParse` Imaginary 1e5
-      parse schemeToken "" "1e-5i" `shouldParse` Imaginary 1e-5
+      parse schemeToken "" "1.i" `shouldParse` Complex (0.0, 1.0)
+      parse schemeToken "" ".1i" `shouldParse` Complex (0.0, 0.1)
+      parse schemeToken "" "1.1i" `shouldParse` Complex (0.0, 1.1)
+      parse schemeToken "" "1e5i" `shouldParse` Complex (0.0, 1e5)
+      parse schemeToken "" "1e-5i" `shouldParse` Complex (0.0, 1e-5)
+    it "is a sign followed by 'i'" $ do
+      parse schemeToken "" "+i" `shouldParse` Complex (0.0, 1.0)
+      parse schemeToken "" "-i" `shouldParse` Complex (0.0, -1.0)
+      parse schemeToken "" "i" `shouldParse` Identifier "i"
+    it "is a float literal, a sign, and then 'i'" $ do
+      parse schemeToken "" "1.+i" `shouldParse` Complex (1.0, 1.0)
+      parse schemeToken "" "1e5-i" `shouldParse` Complex (1e5, -1.0)
+    it "is a float literal, a sign, another float, and then 'i'" $ do
+      parse schemeToken "" "+1.0+1.0i" `shouldParse` Complex (1.0, 1.0)
+      parse schemeToken "" "-1e-5-1e-5i" `shouldParse` Complex (-1e-5, -1e-5)
 
 string :: Spec
 string = do
